@@ -1,0 +1,42 @@
+cabal-version:      2.2
+name:               oleg-zfs
+version:            0.1.0.0
+synopsis:           A Zipper-based File/Operating system using delimited continuations.
+description:
+    This project is an implementation of a Zipper-based File/Operating System (ZFS).
+    It demonstrates the use of delimited continuations to realize threading and exceptions
+    without relying on OS or GHC runtime threads. The core idea is a copy-on-write
+    file system traversal that enables efficient, isolated process operations.
+    .
+    Original code and concepts by Oleg Kiselyov.
+
+homepage:           http://okmij.org/ftp/continuations/ZFS/
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Oleg Kiselyov
+maintainer:         example@example.com
+category:           System, Concurrency
+build-type:         Simple
+
+executable oleg-zfs
+    main-is:          ZFS.hs
+    hs-source-dirs:   src
+    other-modules:
+        ZipperM
+        LowLevelIO
+        CCCxe
+
+    build-depends:
+        base >=4.7 && <5,
+        containers,
+        text,
+        network,
+        unix,
+        mtl
+
+    default-language: Haskell2010
+    ghc-options:      -Wall -threaded -rtsopts -with-rtsopts=-N
+
+    -- These extensions are required by the source files.
+    -- ImpredicativeTypes is a legacy extension.
+    default-extensions: DeriveDataTypeable, ExistentialQuantification, ForeignFunctionInterface, ImpredicativeTypes, KindSignatures, PatternGuards, Rank2Types, RankNTypes
