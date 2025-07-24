@@ -3,3 +3,7 @@ running on GHC 9.2. Package 'network'
 (https://hackage.haskell.org/package/network) is needed to run it.
 
 LICENSE: Public Domain
+
+Run this application
+
+cabal repl
