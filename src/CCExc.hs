@@ -1,8 +1,5 @@
 {-# LANGUAGE PatternGuards, KindSignatures #-}
-{-# LANGUAGE ExistentialQuantification, RankNTypes, ImpredicativeTypes #-}
-
--- This file is the CPS version of CCExc.hs, implementing the identical
--- interface
+{-# LANGUAGE ExistentialQuantification, Rank2Types, ImpredicativeTypes #-}
 
 -- Monad transformer for multi-prompt delimited control
 -- It implements the superset of the interface described in
@@ -35,9 +32,17 @@
 -- Sometimes that is sufficient. There is not need to create a gensym
 -- monad then.
 
--- See CCExc.hs for further comments about the implementation
+-- The second feature of our implementation is the use of the 
+-- bubble-up semantics:
+-- See page 57 of http://okmij.org/ftp/gengo/CAG-talk.pdf
+-- This present code implements, for the first time, the delimited 
+-- continuation monad CC *without* the use of the continuation monad. 
+-- This code implements CC in direct-style, so to speak.
+-- Instead of continuations, we rely on exceptions. Our code has a lot
+-- in common with the Error monad. In fact, our code implements
+-- an Error monad for resumable exceptions.
 
-module CCCxe (
+module CCExc (
 	      CC,			-- Types
 	      SubCont,
 	      CCT,
@@ -66,31 +71,17 @@ module CCCxe (
 
 import Control.Monad.Trans
 import Data.Typeable			-- for prompts of the flavor PP, PD
-import Control.Applicative (Applicative(..))
-import Control.Monad       (liftM, ap)
 
 -- Delimited-continuation monad transformer
 -- It is parameterized by the prompt flavor p
--- The first argument is the regular (success) continuation,
--- the second argument is the bubble, or a resumable exception
-
--- In short, w is the answer type of the context in which a CC computation
--- is running. It represents the type of the final result that the entire
--- program block (e.g., the code inside runCC or pushPrompt) is expected to
--- produce.
-
--- the p is the Prompt Flavor
--- p is a type constructor of kind (* -> *) -> * -> *.
--- It takes the base monad m and a payload type x to 
--- produce the type of a "bubble" or control event 
---payload.
-newtype CC p m a = 
-    CC{unCC:: forall w. (a -> m w) -> 
-                        (forall x. SubCont p m x a -> p m x  -> m w) -> 
-                        m w}
+newtype CC p m a = CC{unCC:: m (CCV p m a)}
 
 -- The captured sub-continuation
 type SubCont p m a b = CC p m a -> CC p m b
+
+-- Produced result: a value or a resumable exception
+data CCV p m a = Iru a
+	       | forall x. Deru (SubCont p m x a) (p m x) -- The bubble
 
 -- The type of control operator's body
 type CCT p m a w = SubCont p m a w -> CC p m w
@@ -101,64 +92,49 @@ type Prompt p m w =
      forall x. p m x -> Maybe (CCT p m x w))
 
 
-
+-- --------------------------------------------------------------------
 -- CC monad: general monadic operations
 
--- the type of x is CC
--- The delimited handler for m is 
--- \ctx -> kd (\x -> ctx x >>= f). If m is aborted 
--- by a shift, its continuation ctx is captured. 
--- We then call the outer handler kd. 
--- The new continuation we pass to it correctly composes
--- the captured part (ctx) with the remaining part of 
--- the bind (>>= f).
 instance Monad m => Monad (CC p m) where
-    return x = CC $ \ki kd -> ki x
+    return = CC . return . Iru
 
-    m >>= f = CC $ \ki kd -> unCC m 
-	                      (\a -> unCC (f a) ki kd)
-			      (\ctx -> kd (\x -> ctx x >>= f))
+    m >>= f = CC $ unCC m >>= check
+	where check (Iru a)         = unCC $ f a
+	      check (Deru ctx body) = return $ Deru (\x -> ctx x >>= f) body
+
 
 instance MonadTrans (CC p) where
-    lift m = CC $ \ki kd -> m >>= ki
+    lift m = CC (m >>= return . Iru)
 
 instance MonadIO m => MonadIO (CC p m) where
     liftIO = lift . liftIO
 
--- To satisfy the Functor-Applicative-Monad proposal in GHC 7.10+
-instance Monad m => Functor (CC p m) where
-  fmap = liftM
-
-instance Monad m => Applicative (CC p m) where
-  pure = return
-  (<*>) = ap
-
 -- --------------------------------------------------------------------
 -- Basic Operations of the delimited control interface
 
--- b is CCT, and CCT type is
--- type CCT p m a w = SubCont p m a w -> CC p m w
 pushPrompt :: Monad m =>
 	      Prompt p m w -> CC p m w -> CC p m w
-pushPrompt p@(_,proj) body = CC $ \ki kd -> 
- let kd' ctx body | Just b <- proj body  = unCC (b ctx) ki kd -- It's caught!
-     kd' ctx body = kd (\x -> pushPrompt p (ctx x)) body -- -- Not for me, keep bubbling.
- in unCC body ki kd'
+pushPrompt p@(_,proj) body = CC $ unCC body >>= check
+ where
+ check e@Iru{} = return e
+ check (Deru ctx body) | Just b <- proj body  = unCC $ b ctx
+ check (Deru ctx body) = return $ Deru (\x -> pushPrompt p (ctx x)) body
 
 
 -- Create the initial bubble
 takeSubCont :: Monad m =>
 	       Prompt p m w -> CCT p m x w -> CC p m x
-takeSubCont p@(inj,_) body = CC $ \ki kd -> kd id (inj body)
+takeSubCont p@(inj,_) body = CC . return $ Deru id (inj body)
 
 -- Apply the captured continuation
 pushSubCont :: Monad m => SubCont p m a b -> CC p m a -> CC p m b
 pushSubCont = ($)
 
 runCC :: Monad m => CC (p :: (* -> *) -> * -> *) m a -> m a
-runCC m = unCC m return err
+runCC m = unCC m >>= check
  where
- err = error "Escaping bubble: you have forgotten pushPrompt"
+ check (Iru x) = return x
+ check _       = error "Escaping bubble: you have forgotten pushPrompt"
 
 
 -- --------------------------------------------------------------------
@@ -212,7 +188,7 @@ newtype P2 w1 w2 m x =
   P2 (Either (CCT (P2 w1 w2) m x w1) (CCT (P2 w1 w2) m x w2))
 
 
--- There are two generalized prompts of the flavor P2"
+-- There are two generalized prompts of the flavor P2:
 p2L :: Prompt (P2 w1 w2) m w1
 p2L = (inj, prj)
  where
@@ -238,9 +214,6 @@ data PP m x = forall w. Typeable w => PP (CCT PP m x w)
 -- be partially applied. But we can treat the type (NCCT p m a w) that way.
 newtype NCCT p m a w = NCCT{unNCCT :: CCT p m a w}
 
--- The cast succeeds only if the Typeable representation
--- of the hidden w in the bubble is identical to the 
--- Typeable representation of the w in the prompt's type.
 pp :: Typeable w => Prompt PP m w
 pp = (inj, prj)
  where
